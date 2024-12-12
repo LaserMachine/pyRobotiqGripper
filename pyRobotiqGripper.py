@@ -22,6 +22,8 @@ import minimalmodbus as mm
 import time
 import serial
 import serial.tools.list_ports
+from pathlib import Path
+import json
 
 #Constants
 BAUDRATE=115200
@@ -126,6 +128,48 @@ class RobotiqGripper( mm.Instrument ):
         self._aCoef=None
         self._bCoef=None
     
+
+    def save_calibration(self, filename: Path | str):
+        """Save the calibration parameters to a file.
+
+        Args:
+            filename (Path): Path to the file where the calibration parameters\
+                will be saved.
+        """
+        assert self.closemm is not None, "No calibration data to save"
+        d = {
+            "closemm": self.closemm,
+            "openmm": self.openmm,
+            "closebit": self.closebit,
+            "openbit": self.openbit,
+            "_aCoef": self._aCoef, # redundant...
+            "_bCoef": self._bCoef
+        }
+        filename = Path(filename).with_suffix(".json")
+        with open(filename, "w") as f:
+            json.dump(d, f)
+        print(f"wrote calibration data to {filename}")
+
+
+    def load_calibration(self, filename: Path):
+        """
+        Load the calibration parameters from a file."""
+        filename = Path(filename)
+        assert filename.exists() and filename.is_file() and filename.suffix == ".json", "Invalid calibration file"
+        try:
+            with open(filename, "r") as f: 
+                d = json.load(f)
+            self.closemm = d["closemm"]
+            self.openmm = d["openmm"]
+            self.closebit = d["closebit"]
+            self.openbit = d["openbit"]
+            self._aCoef = d["_aCoef"]
+            self._bCoef = d["_bCoef"]
+        except Exception as e:
+            print(f"Error loading calibration data: {e}")
+            raise e
+
+
     def _autoConnect(self):
         """Return the name of the port on which is connected the gripper
         """
@@ -422,12 +466,10 @@ class RobotiqGripper( mm.Instrument ):
         """Reset the gripper (clear previous activation if any) and activat\
         the gripper. During this operation the gripper will open and close.
         """
-        #Reset the gripper
         self.reset()
-        #Activate the gripper
         self.activate()
     
-    def goTo(self,position,speed=255,force=255):
+    def goTo(self, position, speed: int =255, force: int =255):
         """Go to the position with determined speed and force.
         
         Args:
@@ -444,17 +486,14 @@ class RobotiqGripper( mm.Instrument ):
         speed=int(speed)
         force=int(force)
         
-        
         #Check if the grippre is activated
-        if self.isActivated == False:
+        if not self.isActivated:
             raise Exception ("Gripper must be activated before requesting\
                              an action.")
 
-        #Check input value
-        if position>255:
-            raise Exception("Position value cannot exceed 255")
-        elif position<0:
-            raise Exception("Position value cannot be under 0")
+        assert 0<=position<=255, f"Position must be between 0 and 255, but is {position}"
+        assert 0<=speed<=255, f"Speed must be between 0 and 255, but is {speed}"
+        assert 0<=force<=255, f"Force must be between 0 and 255, but is {force}"
         
         self.processing=True
         
@@ -463,8 +502,7 @@ class RobotiqGripper( mm.Instrument ):
 
         rGTO = 2**3
         rAct = 2**0
-
-        self.write_registers(0x03E8, [rAct << 8]) # stop motion
+        self.write_registers(0x03E8, [rAct << 8]) # stop motion (rGTO not set!)
         self.write_register(0x03eA, (speed << 8) + force) # set speed and force
         self.write_register(0x03e9, position)     # set goal position
         self.write_registers(0x03E8, [(rGTO + rAct) << 8])    # trigger GoTo action
@@ -487,7 +525,7 @@ class RobotiqGripper( mm.Instrument ):
             if gOBJ==1 or gOBJ==2: 
                 #Fingers have stopped due to a contact
                 objectDetected=True
-                # self.write_registers(0x03E8, [rAct << 8])
+                # self.write_registers(0x03E8, [rAct << 8]) # Stop motion?
             
             elif gOBJ==3:
                 #Fingers are at requested position.
@@ -511,7 +549,8 @@ class RobotiqGripper( mm.Instrument ):
             - force (int, optional): Gripper force between 0 and 255.\
             Default is 255.
         """
-        self.goTo(255,speed,force)
+        target = self.closebit if self.closebit is not None else 255
+        return self.goTo(target, speed, force)
     
     def open(self,speed=255,force=255):
         """Open the gripper
@@ -522,7 +561,8 @@ class RobotiqGripper( mm.Instrument ):
             - force (int, optional): Gripper force between 0 and 255.\
             Default is 255.
         """
-        self.goTo(0,force,speed)
+        target = self.openbit if self.openbit is not None else 0
+        return self.goTo(target, force, speed)
     
     def goTomm(self,positionmm,speed=255,force=255):
         """Go to the requested opening expressed in mm
@@ -538,14 +578,16 @@ class RobotiqGripper( mm.Instrument ):
             Calibration is needed to use this function.\n
             Execute the function calibrate at least 1 time before using this function.
         """
-        if self.isCalibrated == False:
+        if not self.isCalibrated:
             raise Exception("The gripper must be calibrated before been requested to go to a position in mm")
 
-        if  positionmm>self.openmm:
-            raise Exception("The maximum opening is {}".format(self.openmm))
+        if not (self.closemm <= positionmm <= self.openmm):
+            raise Exception("The requested position is out of the gripper range")
         
         position=int(self._mmToBit(positionmm))
-        self.goTo(position,speed,force)
+        position_bit, objectDetected = self.goTo(position,speed,force)
+
+        return self._bitTomm(position_bit), objectDetected
         
     def getPosition(self):
         """Return the position of the gripper in bits
@@ -554,11 +596,8 @@ class RobotiqGripper( mm.Instrument ):
             - int: Position of the gripper in bits.
         """
         self.readAll()
+        return self.paramDic["gPO"]
 
-        position=self.paramDic["gPO"]
-
-        return position
-    
     def _mmToBit(self,mm):
         """Convert a mm gripper opening in bit opening.
 
@@ -566,9 +605,7 @@ class RobotiqGripper( mm.Instrument ):
             Calibration is needed to use this function.\n
             Execute the function calibrate at least 1 time before using this function.
         """
-        bit=(mm-self._bCoef)/self._aCoef
-        
-        return bit
+        return (mm-self._bCoef)/self._aCoef
         
     def _bitTomm(self,bit):
         """Convert a bit gripper opening in mm opening.
@@ -580,9 +617,7 @@ class RobotiqGripper( mm.Instrument ):
             Calibration is needed to use this function.\n
             Execute the function calibrate at least 1 time before using this function.
         """
-        mm=self._aCoef*bit+self._bCoef
-        
-        return mm
+        return self._aCoef*bit+self._bCoef
     
     def getPositionmm(self):
         """Return the position of the gripper in mm.
@@ -594,10 +629,8 @@ class RobotiqGripper( mm.Instrument ):
             Calibration is needed to use this function.\n
             Execute the function calibrate at least 1 time before using this function.
         """
-        position=self.getPosition()
+        return self._bitTomm(self.getPosition())
         
-        positionmm=self._bitTomm(position)
-        return positionmm
     
     def calibrate(self,closemm,openmm):
         """Calibrate the gripper for mm positionning.
@@ -643,23 +676,16 @@ class RobotiqGripper( mm.Instrument ):
         """
         
         self.readAll()
-        is_activated = (self.paramDic["gSTA"]==3)
+        return (self.paramDic["gSTA"]==3)
 
-        return is_activated
-    
     def isCalibrated(self):
         """Return if the gripper is qualibrated
 
         Returns:
             bool: True if the gripper is calibrated. False otherwise.
         """
-        is_calibrated = False
-        if (self.openmm is None) or (self.closemm is None):
-            is_calibrated = False
-        else:
-            is_calibrated=True
-        
-        return is_calibrated
+        return (self._aCoef is not None) and (self._bCoef is not None)
+
             
 #Test
 if False:
