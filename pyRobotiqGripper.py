@@ -458,13 +458,17 @@ class RobotiqGripper( mm.Instrument ):
         
         self.processing=True
         
-
         #rARD(5) rATR(4) rGTO(3) rACT(0)
         #gACT=1 (Gripper activation.) and gGTO=1 (Go to Position Request.)
-        self.write_registers(1000,[0b0000100100000000,
-                                    position,
-                                    speed * 0b100000000 + force])
-        
+
+        rGTO = 2**3
+        rAct = 2**0
+
+        self.write_registers(0x03E8, [rAct << 8]) # stop motion
+        self.write_register(0x03eA, (speed << 8) + force) # set speed and force
+        self.write_register(0x03e9, position)     # set goal position
+        self.write_registers(0x03E8, [(rGTO + rAct) << 8])    # trigger GoTo action
+
         #Waiting for activation to complete
         motionStartTime=time.time()
         motionCompleted=False
@@ -480,10 +484,10 @@ class RobotiqGripper( mm.Instrument ):
             #information on possible object pick-up. Ignore if gGTO == 0.
             gOBJ=self.paramDic["gOBJ"]
 
-            
             if gOBJ==1 or gOBJ==2: 
                 #Fingers have stopped due to a contact
                 objectDetected=True
+                # self.write_registers(0x03E8, [rAct << 8])
             
             elif gOBJ==3:
                 #Fingers are at requested position.
@@ -610,12 +614,12 @@ class RobotiqGripper( mm.Instrument ):
         self.closemm=closemm
         self.openmm=openmm
         
-        self.openGripper()
+        self.open()
         #get open bit
         self.openbit=self.getPosition()
         obit=self.openbit
         
-        self.closeGripper()
+        self.close()
         #get close bit
         self.closebit=self.getPosition()
         cbit=self.closebit
